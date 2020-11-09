@@ -82,12 +82,6 @@ var (
 )
 
 func main() {
-	validTime, _ := time.Parse("2006-01-02 15:04:05", "2021-01-01 00:00:00")
-	nowTime := time.Now()
-	if nowTime.After(validTime) {
-		panic("本工具已失效")
-	}
-
 	flag.StringVar(&licenseName, "g", "", "生成一个永久license，需要指定用户名")
 	flag.StringVar(&originLicense, "p", "", "解析官方证书，需要指定证书路径")
 	flag.StringVar(&xrayFilePath, "c", "", "patch xray，需要指定xray程序文件路径")
@@ -105,6 +99,7 @@ func main() {
 	if xrayFilePath != "" {
 		patch(xrayFilePath)
 	}
+
 }
 
 func parseAlready(licenseFile string) {
@@ -138,9 +133,6 @@ func parseAlready(licenseFile string) {
 		fmt.Println("version ok: 2")
 	}
 
-	//fmt.Printf("pre 17: %x\n", base64DecodeData[:17])
-	//fmt.Printf("pre 17: %x\n", pre17Bytes)
-
 	//解密前有一个简单的变换处理
 	right := len(base64DecodeData) - 1
 	for l := 1; l < right; l++ {
@@ -153,7 +145,7 @@ func parseAlready(licenseFile string) {
 	//fmt.Println("trans bytes:", hex.EncodeToString(base64DecodeData))
 
 	// aes解密license
-	// 总长度 487，前面17个字节是单独加上的，所以总共解密出 480个字节的数据
+	// | 1B : version | 16B : aes iv | 480B : cipher |
 	aesDecData, err := Decrypt(base64DecodeData[17:], base64DecodeData[1:17])
 	if err != nil {
 		panic(err)
@@ -329,22 +321,22 @@ func importPrivateKey(key string) *rsa.PrivateKey {
 	return privateKey
 }
 
-
 var (
-	origin386Bytes     = []byte{0x0F, 0x95, 0xC0, 0x83, 0xF0, 0x01, 0x88, 0x44, 0x24, 0x50, 0x83, 0xC4, 0x30, 0xC3}
-	new386Bytes        = []byte{0x0F, 0x94, 0xC0, 0x83, 0xF0, 0x01, 0x88, 0x44, 0x24, 0x50, 0x83, 0xC4, 0x30, 0xC3}
-	originAmd64Bytes   = []byte{0x0F, 0x94, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00}
-	newAmd64Bytes      = []byte{0x0F, 0x95, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00}
-	originArmBytes     = []byte{}
-	newArmBytes        = []byte{}
-	originAArch64Bytes = []byte{}
-	newAArch64Bytes    = []byte{}
+	origin386Bytes, _     = hex.DecodeString("0F95C083F0018844245083C430C3")
+	new386Bytes, _        = hex.DecodeString("0F94C083F0018844245083C430C3")
+	originAmd64Bytes, _   = hex.DecodeString("000F84BE020000")
+	newAmd64Bytes, _      = hex.DecodeString("000F85BE020000")
+	originArmBytes, _     = hex.DecodeString("000050E30000A0E30100A013010020E254")
+	newArmBytes, _        = hex.DecodeString("000050E30000A0E30100A0130100A0E354")
+	originAArch64Bytes, _ = hex.DecodeString("1F001FEBE0079F9A000040D2E0C3")
+	newAArch64Bytes, _    = hex.DecodeString("1F001FEBE0079F9A200080D2E0C3")
 )
 
 func patch(filePath string) {
 	var (
 		originBytes []byte
 		newBytes    []byte
+		maxIndex    uint64 = 0
 	)
 
 	if elfFile, err := elf.Open(filePath); err == nil {
@@ -367,6 +359,13 @@ func patch(filePath string) {
 			newBytes = newAArch64Bytes
 		default:
 			fmt.Println("Unsupported linux platform!!")
+		}
+		sections := elfFile.Sections
+		for _, i := range sections {
+			if i.Name == ".text" {
+				maxIndex = i.Addr + i.Size
+				fmt.Printf("[.text] offset: %#x, addr: %#x-%#x\n", i.Offset, i.Addr, maxIndex)
+			}
 		}
 	} else if peFile, err := pe.Open(filePath); err == nil {
 		switch peFile.Machine {
@@ -402,11 +401,23 @@ func patch(filePath string) {
 
 	origin, err := ioutil.ReadFile(filePath)
 	loc := bytes.LastIndex(origin, originBytes)
-	fmt.Printf("Signature index: %#x\n", loc)
 
-	newFile := bytes.ReplaceAll(origin, originBytes, newBytes)
-	err = ioutil.WriteFile(filePath, newFile, os.ModePerm)
-	if err == nil {
-		fmt.Println("Patch success:", filePath)
+	if loc > 0 {
+		fmt.Printf("Signature index: %#x\n", loc)
+		newFile := replace(origin, newBytes, loc)
+		err = ioutil.WriteFile(filePath, newFile, os.ModePerm)
+		if err == nil {
+			fmt.Println("Patch success:", filePath)
+		}
+	} else {
+		fmt.Println("Can't find signature")
 	}
+}
+
+func replace(origin, new []byte, index int) []byte {
+	n := make([]byte, len(origin))
+	copy(n[:index], origin[:index])
+	copy(n[index:index+len(new)], new)
+	copy(n[index+len(new):], origin[index+len(new):])
+	return n
 }
